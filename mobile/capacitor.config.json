@@ -1,0 +1,6 @@
+{
+  "appId": "com.tgclone.app",
+  "appName": "TgClone",
+  "webDir": "www",
+  "server": { "url": "__SERVER_URL__", "cleartext": false }
+}

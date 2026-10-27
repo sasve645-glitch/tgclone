@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>TgClone</title>
+<style>
+:root{--bg:#fff;--fg:#111;--mut:#777;--acc:#2a8bd6;--side:#f4f6f8;--me:#d9efff;--oth:#f0f0f0;--bd:#e3e3e3}
+@media(prefers-color-scheme:dark){:root{--bg:#17212b;--fg:#eee;--mut:#8fa0b0;--side:#0e1621;--me:#2b5278;--oth:#222f3d;--bd:#2a3846}}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{font:15px system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+button,input{font:inherit;color:inherit}
+input{background:var(--bg);border:1px solid var(--bd);border-radius:10px;padding:10px;width:100%}
+button{background:var(--acc);color:#fff;border:0;border-radius:10px;padding:10px 14px;cursor:pointer}
+button.ghost{background:none;color:var(--acc);padding:6px 8px}
+#auth{max-width:340px;margin:8vh auto;padding:20px;display:flex;flex-direction:column;gap:10px}
+#app{display:none;height:100%;grid-template-columns:320px 1fr}
+#side{background:var(--side);border-right:1px solid var(--bd);display:flex;flex-direction:column;min-height:0}
+#side .top{padding:10px;display:flex;gap:6px}
+#list{overflow:auto;flex:1}
+.ci{padding:10px 12px;border-bottom:1px solid var(--bd);cursor:pointer;display:flex;justify-content:space-between;gap:8px}
+.ci.on{background:var(--me)}.ci b,.ci small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ci small{color:var(--mut)}.badge{background:var(--acc);color:#fff;border-radius:12px;padding:1px 7px;font-size:12px;align-self:center}
+#main{display:flex;flex-direction:column;min-height:0;height:100%}
+#head{padding:10px 14px;border-bottom:1px solid var(--bd);display:flex;gap:8px;align-items:center}
+#head div{flex:1}#head small{color:var(--mut);display:block;min-height:1.2em}
+#msgs{flex:1;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:6px}
+.m{max-width:75%;padding:7px 10px;border-radius:12px;background:var(--oth);align-self:flex-start;word-wrap:break-word;white-space:pre-wrap}
+.m.me{background:var(--me);align-self:flex-end}.m .n{color:var(--acc);font-weight:600;font-size:13px}
+.m .t{color:var(--mut);font-size:11px;text-align:right}.m .rp{border-left:3px solid var(--acc);padding-left:6px;color:var(--mut);font-size:13px}
+.m img{max-width:100%;border-radius:8px;display:block}.m .act{display:none;gap:4px}.m:hover .act,.m.sel .act{display:flex}
+.m .act button{padding:2px 6px;font-size:12px}.del{color:var(--mut);font-style:italic}
+#bar{padding:8px;border-top:1px solid var(--bd);display:flex;gap:6px;padding-bottom:max(8px,env(safe-area-inset-bottom))}
+#ctx{padding:4px 12px;color:var(--mut);font-size:13px;display:none}
+#back{display:none}#empty{margin:auto;color:var(--mut)}
+@media(max-width:700px){#app{grid-template-columns:1fr}#main{display:none}#app.chat #side{display:none}#app.chat #main{display:flex}#back{display:block}}
+</style></head><body>
+<div id="auth"></div>
+<div id="app"><div id="side"><div class="top"><input id="q" placeholder="Поиск людей и каналов"><button id="mk" title="Новая группа/канал">＋</button></div><div id="list"></div>
+<div class="top"><button class="ghost" id="out">Выйти</button></div></div>
+<div id="main"><div id="empty">Выберите чат</div></div></div>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const $=s=>document.querySelector(s);
+const el=(t,p={},...k)=>{const e=Object.assign(document.createElement(t),p);k.flat().forEach(c=>e.append(c));return e};
+let token=localStorage.t,me,chats=[],cur=null,sock,reply=null,editing=null,online=new Set(),typingT;
+const api=async(p,m='GET',b)=>{const r=await fetch('/api'+p,{method:m,headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:b&&JSON.stringify(b)});
+ const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||'Ошибка');return j};
+const hm=t=>new Date(t).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+
+function authView(mode='login',email=''){
+ const a=$('#auth');a.replaceChildren();const f={};
+ const inp=(k,ph,type='text',v='')=>{f[k]=el('input',{placeholder:ph,type,value:v});a.append(f[k])};
+ const err=el('small',{style:'color:#d33'});
+ a.append(el('h2',{textContent:'TgClone'}));
+ if(mode==='login'){inp('login','E-mail или @username');inp('password','Пароль','password')}
+ if(mode==='reg'){inp('email','E-mail','email');inp('username','username');inp('name','Имя');inp('password','Пароль (8+ символов)','password')}
+ if(mode==='code'){a.append(el('p',{textContent:'Код отправлен на '+email}));inp('code','Код из письма')}
+ const go=el('button',{textContent:{login:'Войти',reg:'Зарегистрироваться',code:'Подтвердить'}[mode]});
+ go.onclick=async()=>{try{const v=Object.fromEntries(Object.entries(f).map(([k,e])=>[k,e.value]));
+  if(mode==='login')done(await api('/login','POST',v));
+  else if(mode==='reg'){await api('/register','POST',v);authView('code',v.email)}
+  else done(await api('/verify','POST',{email,code:v.code}))}catch(e){err.textContent=e.message}};
+ a.append(go,err);
+ if(mode!=='code')a.append(el('button',{className:'ghost',textContent:mode==='login'?'Создать аккаунт':'Уже есть аккаунт',onclick:()=>authView(mode==='login'?'reg':'login')}));
+}
+function done(r){token=localStorage.t=r.token;me=r.user;start()}
+async function start(){
+ try{me=await api('/me')}catch{return authView()}
+ $('#auth').style.display='none';$('#app').style.display='grid';
+ sock=io({auth:{token}});
+ sock.on('message:new',m=>{const c=chats.find(c=>c.id===m.chat_id);if(!c)return;c.last=m;
+  if(cur?.id===m.chat_id){addMsg(m);markRead()}else if(m.sender_id!==me.id)c.unread++;sortList()});
+ sock.on('message:update',m=>{const e=document.getElementById('m'+m.id);if(e)e.replaceWith(msgEl(m));const c=chats.find(c=>c.id===m.chat_id);if(c?.last?.id===m.id){c.last=m;renderList()}});
+ sock.on('chat:new',c=>{chats=chats.filter(x=>x.id!==c.id);chats.push(c);sortList()});
+ sock.on('presence',p=>{p.online?online.add(p.userId):online.delete(p.userId);if(cur?.peer?.id===p.userId)sub()});
+ sock.on('typing',t=>{if(cur?.id!==t.chatId)return;$('#sub').textContent=t.name+' печатает…';clearTimeout(typingT);typingT=setTimeout(sub,2000)});
+ chats=await api('/chats');renderList();
+}
+const sortList=()=>{chats.sort((a,b)=>(b.last?.id||0)-(a.last?.id||0));renderList()};
+const preview=c=>!c.last?'':(c.last.deleted?'Сообщение удалено':c.last.text||'📎 '+(c.last.file_name||'Файл'));
+function renderList(){const l=$('#list');l.replaceChildren(...chats.map(c=>el('div',{className:'ci'+(cur?.id===c.id?' on':''),onclick:()=>open(c)},
+ el('div',{style:'min-width:0'},el('b',{textContent:({channel:'📢 ',group:'👥 '}[c.type]||'')+c.title}),el('small',{textContent:preview(c)})),
+ c.unread?el('span',{className:'badge',textContent:c.unread}):'')))}
+const sub=()=>{const s=$('#sub');if(!s||!cur)return;s.textContent=cur.type==='private'?(online.has(cur.peer?.id)?'в сети':cur.peer?.last_seen?'был(а) '+new Date(cur.peer.last_seen).toLocaleString():'не в сети'):cur.members+' участн.'};
+async function open(c){
+ cur=c;reply=editing=null;c.unread=0;$('#app').classList.add('chat');
+ const m=$('#main');m.replaceChildren(
+  el('div',{id:'head'},el('button',{id:'back',className:'ghost',textContent:'←',onclick:()=>{$('#app').classList.remove('chat');cur=null;renderList()}}),
+   el('div',{},el('b',{textContent:c.title}),el('small',{id:'sub'})),el('button',{className:'ghost',textContent:'Выйти из чата',onclick:async()=>{if(confirm('Покинуть чат?')){await api('/chats/'+c.id+'/leave','POST');chats=chats.filter(x=>x!==c);cur=null;m.replaceChildren(el('div',{id:'empty',textContent:'Выберите чат'}));renderList()}}})),
+  el('div',{id:'msgs'}),el('div',{id:'ctx'}));
+ if(c.type==='channel'&&!['owner','admin'].includes(c.role))m.append(el('div',{id:'bar',style:'justify-content:center;color:var(--mut)',textContent:'Только админы могут писать'}));
+ else{const fi=el('input',{type:'file',style:'display:none',onchange:async()=>{const fd=new FormData();fd.append('file',fi.files[0]);
+   const r=await fetch('/api/upload',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});const j=await r.json();if(r.ok)send('',j.url,j.name);fi.value=''}});
+  const t=el('input',{id:'txt',placeholder:'Сообщение',autocomplete:'off',oninput:()=>sock.emit('typing',{chatId:c.id}),onkeydown:e=>e.key==='Enter'&&submit()});
+  m.append(el('div',{id:'bar'},fi,el('button',{className:'ghost',textContent:'📎',onclick:()=>fi.click()}),t,el('button',{textContent:'➤',onclick:submit})))}
+ sub();renderList();
+ const ms=await api('/chats/'+c.id+'/messages');ms.forEach(addMsg);markRead();
+}
+function msgEl(m){
+ const mine=m.sender_id===me.id,d=el('div',{className:'m'+(mine?' me':''),id:'m'+m.id});
+ if(cur.type!=='private'&&!mine)d.append(el('div',{className:'n',textContent:m.sender_name||'?'}));
+ if(m.reply)d.append(el('div',{className:'rp',textContent:(m.reply.sender_name||'')+': '+m.reply.text}));
+ if(m.deleted)d.append(el('div',{className:'del',textContent:'Сообщение удалено'}));
+ else{if(m.file_url)d.append(/\.(png|jpe?g|gif|webp)$/i.test(m.file_url)?el('img',{src:m.file_url}):el('a',{href:m.file_url,target:'_blank',textContent:'📎 '+(m.file_name||'файл')}));
+  if(m.text)d.append(document.createTextNode(m.text))}
+ d.append(el('div',{className:'t',textContent:(m.edited?'изменено ':'')+hm(m.created_at)}));
+ if(!m.deleted){const a=el('div',{className:'act'},el('button',{textContent:'↩',onclick:()=>setCtx('reply',m)}));
+  if(mine)a.append(el('button',{textContent:'✎',onclick:()=>setCtx('edit',m)}));
+  if(mine||['owner','admin'].includes(cur.role))a.append(el('button',{textContent:'🗑',onclick:()=>sock.emit('message:delete',{id:m.id})}));d.append(a)}
+ return d}
+function addMsg(m){const b=$('#msgs');if(!b||m.chat_id!==cur.id)return;const near=b.scrollHeight-b.scrollTop-b.clientHeight<120;b.append(msgEl(m));if(near||m.sender_id===me.id)b.scrollTop=b.scrollHeight}
+function setCtx(kind,m){reply=kind==='reply'?m:null;editing=kind==='edit'?m:null;const c=$('#ctx');c.style.display='block';
+ c.replaceChildren((kind==='reply'?'Ответ: ':'Правка: ')+(m.text||'файл').slice(0,50)+' ',el('button',{className:'ghost',textContent:'✕',onclick:()=>{reply=editing=null;c.style.display='none';$('#txt').value=''}}));
+ if(kind==='edit')$('#txt').value=m.text;$('#txt').focus()}
+function submit(){const t=$('#txt');const v=t.value.trim();if(!v)return;
+ if(editing){sock.emit('message:edit',{id:editing.id,text:v});editing=null}else send(v);t.value='';reply=null;$('#ctx').style.display='none'}
+function send(text,fileUrl,fileName){sock.emit('message:send',{chatId:cur.id,text,fileUrl,fileName,replyTo:reply?.id},r=>r?.error&&alert(r.error))}
+function markRead(){const l=$('#msgs')?.lastElementChild;if(l&&cur)sock.emit('read',{chatId:cur.id,messageId:+l.id.slice(1)})}
+let st;$('#q').oninput=e=>{clearTimeout(st);const v=e.target.value.trim();if(v.length<2)return renderList();
+ st=setTimeout(async()=>{const r=await api('/search?q='+encodeURIComponent(v));
+  $('#list').replaceChildren(...r.users.map(u=>el('div',{className:'ci',onclick:async()=>{const c=await api('/chats','POST',{type:'private',userId:u.id});if(!chats.find(x=>x.id===c.id))chats.push(c);$('#q').value='';renderList();open(chats.find(x=>x.id===c.id))}},el('div',{},el('b',{textContent:u.name}),el('small',{textContent:'@'+u.username})))),
+   ...r.chats.map(c=>el('div',{className:'ci',onclick:async()=>{const x=await api('/chats/'+c.id+'/join','POST');if(!chats.find(y=>y.id===x.id))chats.push(x);$('#q').value='';renderList();open(chats.find(y=>y.id===x.id))}},el('div',{},el('b',{textContent:'📢 '+c.title}),el('small',{textContent:'Присоединиться'})))))},300)};
+$('#mk').onclick=async()=>{const type=confirm('OK = канал (пишут только админы)\nОтмена = группа')?'channel':'group';
+ const title=prompt('Название');if(!title)return;const us=prompt('Username участников через запятую (необязательно)')||'';
+ const pub=confirm('Сделать публичным (виден в поиске)?');
+ try{const c=await api('/chats','POST',{type,title,is_public:pub,usernames:us.split(',').map(s=>s.trim()).filter(Boolean)});if(!chats.find(x=>x.id===c.id))chats.push(c);renderList();open(chats.find(x=>x.id===c.id))}catch(e){alert(e.message)}};
+$('#out').onclick=()=>{localStorage.removeItem('t');location.reload()};
+token?start():authView();
+</script></body></html>
