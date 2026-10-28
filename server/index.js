@@ -14,6 +14,14 @@ const mailer = process.env.SMTP_HOST ? nodemailer.createTransport({
   host: process.env.SMTP_HOST, port: +process.env.SMTP_PORT || 587,
   auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } }) : null;
 const sendCode = async (email, code) => {
+  if (process.env.BREVO_API_KEY) { // HTTPS API (works on Render free, where SMTP ports are blocked)
+    const r = await fetch('https://api.brevo.com/v3/smtp/email', { method: 'POST',
+      headers: { 'api-key': process.env.BREVO_API_KEY, 'content-type': 'application/json' },
+      body: JSON.stringify({ sender: { email: process.env.MAIL_FROM_EMAIL, name: 'TgClone' }, to: [{ email }],
+        subject: 'Код подтверждения', textContent: `Ваш код: ${code} (действует 10 минут)` }) });
+    if (!r.ok) throw new Error('Brevo ' + r.status + ' ' + await r.text());
+    return;
+  }
   if (!mailer) return console.log(`[DEV] code for ${email}: ${code}`);
   await mailer.sendMail({ from: process.env.MAIL_FROM || process.env.SMTP_USER, to: email, subject: 'Код подтверждения', text: `Ваш код: ${code} (действует 10 минут)` });
 };
@@ -28,7 +36,7 @@ const limit = (max, ms) => (req, res, next) => {
   a.push(now); hits.set(k, a); next();
 };
 const sign = u => jwt.sign({ id: u.id }, SECRET, { expiresIn: '30d' });
-const pub = u => u && ({ id: u.id, username: u.username, name: u.name, last_seen: u.last_seen });
+const pub = u => u && ({ id: u.id, username: u.username, name: u.name, last_seen: u.last_seen, bio: u.bio, avatar: u.avatar });
 const auth = (req, res, next) => {
   try { const { id } = jwt.verify((req.headers.authorization || '').replace('Bearer ', ''), SECRET);
     const u = db.prepare('SELECT * FROM users WHERE id=? AND verified=1').get(id);
@@ -39,6 +47,7 @@ const member = (chatId, userId) => db.prepare('SELECT * FROM members WHERE chat_
 const getMsg = id => {
   const m = db.prepare(`SELECT m.*, u.name sender_name, u.username sender_username FROM messages m LEFT JOIN users u ON u.id=m.sender_id WHERE m.id=?`).get(id);
   if (m && m.deleted) { m.text = ''; m.file_url = null; m.file_name = null; }
+  if (m) m.reactions = db.prepare('SELECT emoji, COUNT(*) n, GROUP_CONCAT(user_id) users FROM reactions WHERE msg_id=? GROUP BY emoji').all(id);
   if (m && m.reply_to) { const r = db.prepare('SELECT m.id,m.text,m.deleted,u.name sender_name FROM messages m LEFT JOIN users u ON u.id=m.sender_id WHERE m.id=?').get(m.reply_to);
     m.reply = r && { id: r.id, text: r.deleted ? 'Сообщение удалено' : (r.text || '📎 Файл'), sender_name: r.sender_name }; }
   return m;
@@ -83,6 +92,30 @@ app.post('/api/login', limit(20, 900e3), (req, res) => {
   res.json({ token: sign(u), user: pub(u) });
 });
 app.get('/api/me', auth, (req, res) => res.json(pub(req.user)));
+
+app.post('/api/profile', auth, (req, res) => {
+  const name = String(req.body.name || '').trim().slice(0, 40) || req.user.name, bio = String(req.body.bio || '').slice(0, 200);
+  let av = req.body.avatar; if (av && !/^\/uploads\/[\w.]+$/.test(av)) av = null;
+  db.prepare('UPDATE users SET name=?,bio=?,avatar=? WHERE id=?').run(name, bio, av || null, req.user.id);
+  res.json(pub(db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id)));
+});
+app.post('/api/forgot', limit(5, 3600e3), async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  if (db.prepare('SELECT id FROM users WHERE email=? AND verified=1').get(email)) {
+    const code = String(crypto.randomInt(100000, 1000000));
+    db.prepare('INSERT OR REPLACE INTO codes VALUES(?,?,?,0)').run('reset:' + email, hash(code), Date.now() + 600e3);
+    try { await sendCode(email, code); } catch (e) { console.error(e); }
+  }
+  res.json({ ok: true });
+});
+app.post('/api/reset', limit(20, 3600e3), (req, res) => {
+  const email = String(req.body.email || '').toLowerCase(), k = 'reset:' + email, c = db.prepare('SELECT * FROM codes WHERE email=?').get(k);
+  if (String(req.body.password || '').length < 8) return res.status(400).json({ error: 'Пароль минимум 8 символов' });
+  if (!c || c.expires < Date.now() || c.attempts >= 5) return res.status(400).json({ error: 'Код недействителен' });
+  if (c.code_hash !== hash(String(req.body.code || '').trim())) { db.prepare('UPDATE codes SET attempts=attempts+1 WHERE email=?').run(k); return res.status(400).json({ error: 'Неверный код' }); }
+  db.prepare('UPDATE users SET pass_hash=? WHERE email=?').run(bcrypt.hashSync(req.body.password, 10), email); db.prepare('DELETE FROM codes WHERE email=?').run(k);
+  res.json({ ok: true });
+});
 
 // ---- search / chats ----
 app.get('/api/search', auth, (req, res) => {
@@ -132,6 +165,11 @@ app.get('/api/chats/:id/messages', auth, (req, res) => {
   const rows = db.prepare('SELECT id FROM messages WHERE chat_id=? AND id<? ORDER BY id DESC LIMIT 50').all(+req.params.id, before);
   res.json(rows.map(r => getMsg(r.id)).reverse());
 });
+app.get('/api/chats/:id/search', auth, (req, res) => {
+  if (!member(+req.params.id, req.user.id)) return res.status(403).json({ error: 'Нет доступа' });
+  const q = '%' + String(req.query.q || '').replace(/[%_]/g, '') + '%';
+  res.json(db.prepare('SELECT id FROM messages WHERE chat_id=? AND deleted=0 AND text LIKE ? ORDER BY id DESC LIMIT 30').all(+req.params.id, q).map(r => getMsg(r.id)));
+});
 const upload = multer({ limits: { fileSize: 25e6 }, storage: multer.diskStorage({ destination: UP,
   filename: (r, f, cb) => cb(null, crypto.randomBytes(16).toString('hex') + path.extname(f.originalname).replace(/[^.\w]/g, '').slice(0, 10)) }) });
 app.post('/api/upload', auth, limit(60, 3600e3), upload.single('file'), (req, res) => res.json({ url: '/uploads/' + req.file.filename, name: req.file.originalname }));
@@ -148,14 +186,27 @@ io.on('connection', s => {
     if (c.type === 'channel' && !['owner', 'admin'].includes(m.role)) return ack?.({ error: 'В канал пишут только админы' });
     const text = String(d.text || '').trim().slice(0, 4000); if (!text && !d.fileUrl) return ack?.({ error: 'Пусто' });
     if (d.fileUrl && !/^\/uploads\/[\w.]+$/.test(d.fileUrl)) return ack?.({ error: 'Файл' });
-    const id = db.prepare('INSERT INTO messages(chat_id,sender_id,text,file_url,file_name,reply_to,created_at) VALUES(?,?,?,?,?,?,?)')
-      .run(c.id, u.id, text, d.fileUrl || null, d.fileName ? String(d.fileName).slice(0, 100) : null, d.replyTo || null, Date.now()).lastInsertRowid;
+    const id = db.prepare('INSERT INTO messages(chat_id,sender_id,text,file_url,file_name,reply_to,fwd_from,created_at) VALUES(?,?,?,?,?,?,?,?)')
+      .run(c.id, u.id, text, d.fileUrl || null, d.fileName ? String(d.fileName).slice(0, 100) : null, d.replyTo || null, d.fwdFrom ? String(d.fwdFrom).slice(0, 60) : null, Date.now()).lastInsertRowid;
     io.to('chat:' + c.id).emit('message:new', getMsg(id)); ack?.({ ok: true });
   });
   s.on('message:edit', d => { const m = db.prepare('SELECT * FROM messages WHERE id=? AND sender_id=? AND deleted=0').get(+d.id, u.id); const t = String(d.text || '').trim().slice(0, 4000);
     if (m && t) { db.prepare('UPDATE messages SET text=?,edited=1 WHERE id=?').run(t, m.id); io.to('chat:' + m.chat_id).emit('message:update', getMsg(m.id)); } });
   s.on('message:delete', d => { const m = db.prepare('SELECT * FROM messages WHERE id=?').get(+d.id); const mm = m && member(m.chat_id, u.id);
     if (m && mm && (m.sender_id === u.id || ['owner', 'admin'].includes(mm.role))) { db.prepare('UPDATE messages SET deleted=1 WHERE id=?').run(m.id); io.to('chat:' + m.chat_id).emit('message:update', getMsg(m.id)); } });
+  s.on('message:react', d => {
+    const m = db.prepare('SELECT * FROM messages WHERE id=? AND deleted=0').get(+d.id); if (!m || !member(m.chat_id, u.id)) return;
+    const e = String(d.emoji || '').slice(0, 8); if (!e) return;
+    const x = db.prepare('SELECT emoji FROM reactions WHERE msg_id=? AND user_id=?').get(m.id, u.id);
+    if (x && x.emoji === e) db.prepare('DELETE FROM reactions WHERE msg_id=? AND user_id=?').run(m.id, u.id);
+    else db.prepare('INSERT OR REPLACE INTO reactions VALUES(?,?,?)').run(m.id, u.id, e);
+    io.to('chat:' + m.chat_id).emit('message:update', getMsg(m.id));
+  });
+  s.on('message:pin', d => {
+    const m = db.prepare('SELECT * FROM messages WHERE id=? AND deleted=0').get(+d.id), mm = m && member(m.chat_id, u.id), c = m && db.prepare('SELECT type FROM chats WHERE id=?').get(m.chat_id);
+    if (!m || !mm || (c.type === 'channel' && !['owner', 'admin'].includes(mm.role))) return;
+    db.prepare('UPDATE messages SET pinned=? WHERE id=?').run(m.pinned ? 0 : 1, m.id); io.to('chat:' + m.chat_id).emit('message:update', getMsg(m.id));
+  });
   s.on('typing', d => member(+d.chatId, u.id) && s.to('chat:' + d.chatId).emit('typing', { chatId: +d.chatId, userId: u.id, name: u.name }));
   s.on('read', d => { if (!member(+d.chatId, u.id)) return; db.prepare('INSERT INTO reads VALUES(?,?,?) ON CONFLICT(chat_id,user_id) DO UPDATE SET last_read=MAX(last_read,excluded.last_read)').run(+d.chatId, u.id, +d.messageId || 0);
     s.to('chat:' + d.chatId).emit('read', { chatId: +d.chatId, userId: u.id, messageId: +d.messageId }); });

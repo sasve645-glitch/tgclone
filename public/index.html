@@ -35,7 +35,7 @@ button.ghost{background:none;color:var(--acc);padding:6px 8px}
 </style></head><body>
 <div id="auth"></div>
 <div id="app"><div id="side"><div class="top"><input id="q" placeholder="Поиск людей и каналов"><button id="mk" title="Новая группа/канал">＋</button></div><div id="list"></div>
-<div class="top"><button class="ghost" id="out">Выйти</button></div></div>
+<div class="top"><button class="ghost" id="prof">⚙ Профиль</button><button class="ghost" id="out">Выйти</button></div></div>
 <div id="main"><div id="empty">Выберите чат</div></div></div>
 <script src="/socket.io/socket.io.js"></script>
 <script>
@@ -53,14 +53,19 @@ function authView(mode='login',email=''){
  a.append(el('h2',{textContent:'TgClone'}));
  if(mode==='login'){inp('login','E-mail или @username');inp('password','Пароль','password')}
  if(mode==='reg'){inp('email','E-mail','email');inp('username','username');inp('name','Имя');inp('password','Пароль (8+ символов)','password')}
+ if(mode==='forgot')inp('email','E-mail','email');
+ if(mode==='reset'){a.append(el('p',{textContent:'Код отправлен на '+email}));inp('code','Код из письма');inp('password','Новый пароль (8+)','password')}
  if(mode==='code'){a.append(el('p',{textContent:'Код отправлен на '+email}));inp('code','Код из письма')}
- const go=el('button',{textContent:{login:'Войти',reg:'Зарегистрироваться',code:'Подтвердить'}[mode]});
+ const go=el('button',{textContent:{login:'Войти',reg:'Зарегистрироваться',code:'Подтвердить',forgot:'Получить код',reset:'Сменить пароль'}[mode]});
  go.onclick=async()=>{try{const v=Object.fromEntries(Object.entries(f).map(([k,e])=>[k,e.value]));
   if(mode==='login')done(await api('/login','POST',v));
   else if(mode==='reg'){await api('/register','POST',v);authView('code',v.email)}
+  else if(mode==='forgot'){await api('/forgot','POST',v);authView('reset',v.email)}
+  else if(mode==='reset'){await api('/reset','POST',{email,code:v.code,password:v.password});authView('login')}
   else done(await api('/verify','POST',{email,code:v.code}))}catch(e){err.textContent=e.message}};
  a.append(go,err);
- if(mode!=='code')a.append(el('button',{className:'ghost',textContent:mode==='login'?'Создать аккаунт':'Уже есть аккаунт',onclick:()=>authView(mode==='login'?'reg':'login')}));
+ if(mode==='login')a.append(el('button',{className:'ghost',textContent:'Забыли пароль?',onclick:()=>authView('forgot')}));
+ if(!['code','reset'].includes(mode))a.append(el('button',{className:'ghost',textContent:mode==='login'?'Создать аккаунт':'Уже есть аккаунт',onclick:()=>authView(mode==='login'?'reg':'login')}));
 }
 function done(r){token=localStorage.t=r.token;me=r.user;start()}
 async function start(){
@@ -85,25 +90,27 @@ async function open(c){
  cur=c;reply=editing=null;c.unread=0;$('#app').classList.add('chat');
  const m=$('#main');m.replaceChildren(
   el('div',{id:'head'},el('button',{id:'back',className:'ghost',textContent:'←',onclick:()=>{$('#app').classList.remove('chat');cur=null;renderList()}}),
-   el('div',{},el('b',{textContent:c.title}),el('small',{id:'sub'})),el('button',{className:'ghost',textContent:'Выйти из чата',onclick:async()=>{if(confirm('Покинуть чат?')){await api('/chats/'+c.id+'/leave','POST');chats=chats.filter(x=>x!==c);cur=null;m.replaceChildren(el('div',{id:'empty',textContent:'Выберите чат'}));renderList()}}})),
+   c.peer?.avatar?el('img',{src:c.peer.avatar,style:'width:36px;height:36px;border-radius:50%;object-fit:cover'}):'',el('div',{},el('b',{textContent:c.title}),el('small',{id:'sub'})),el('button',{className:'ghost',textContent:'🔍',onclick:srch}),el('button',{className:'ghost',textContent:'Выйти из чата',onclick:async()=>{if(confirm('Покинуть чат?')){await api('/chats/'+c.id+'/leave','POST');chats=chats.filter(x=>x!==c);cur=null;m.replaceChildren(el('div',{id:'empty',textContent:'Выберите чат'}));renderList()}}})),
   el('div',{id:'msgs'}),el('div',{id:'ctx'}));
  if(c.type==='channel'&&!['owner','admin'].includes(c.role))m.append(el('div',{id:'bar',style:'justify-content:center;color:var(--mut)',textContent:'Только админы могут писать'}));
  else{const fi=el('input',{type:'file',style:'display:none',onchange:async()=>{const fd=new FormData();fd.append('file',fi.files[0]);
    const r=await fetch('/api/upload',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});const j=await r.json();if(r.ok)send('',j.url,j.name);fi.value=''}});
   const t=el('input',{id:'txt',placeholder:'Сообщение',autocomplete:'off',oninput:()=>sock.emit('typing',{chatId:c.id}),onkeydown:e=>e.key==='Enter'&&submit()});
-  m.append(el('div',{id:'bar'},fi,el('button',{className:'ghost',textContent:'📎',onclick:()=>fi.click()}),t,el('button',{textContent:'➤',onclick:submit})))}
+  m.append(el('div',{id:'bar'},fi,el('button',{className:'ghost',textContent:'📎',onclick:()=>fi.click()}),el('button',{className:'ghost',textContent:'🎤',onclick:rec}),t,el('button',{textContent:'➤',onclick:submit})))}
  sub();renderList();
  const ms=await api('/chats/'+c.id+'/messages');ms.forEach(addMsg);markRead();
 }
 function msgEl(m){
  const mine=m.sender_id===me.id,d=el('div',{className:'m'+(mine?' me':''),id:'m'+m.id});
  if(cur.type!=='private'&&!mine)d.append(el('div',{className:'n',textContent:m.sender_name||'?'}));
+ if(m.fwd_from)d.append(el('div',{className:'rp',textContent:'↪ от '+m.fwd_from}));
  if(m.reply)d.append(el('div',{className:'rp',textContent:(m.reply.sender_name||'')+': '+m.reply.text}));
  if(m.deleted)d.append(el('div',{className:'del',textContent:'Сообщение удалено'}));
- else{if(m.file_url)d.append(/\.(png|jpe?g|gif|webp)$/i.test(m.file_url)?el('img',{src:m.file_url}):el('a',{href:m.file_url,target:'_blank',textContent:'📎 '+(m.file_name||'файл')}));
+ else{if(m.file_url)d.append(/\.(png|jpe?g|gif|webp)$/i.test(m.file_url)?el('img',{src:m.file_url}):/\.(webm|ogg|mp3|m4a)$/i.test(m.file_url)?el('audio',{src:m.file_url,controls:true}):el('a',{href:m.file_url,target:'_blank',textContent:'📎 '+(m.file_name||'файл')}));
   if(m.text)d.append(document.createTextNode(m.text))}
- d.append(el('div',{className:'t',textContent:(m.edited?'изменено ':'')+hm(m.created_at)}));
- if(!m.deleted){const a=el('div',{className:'act'},el('button',{textContent:'↩',onclick:()=>setCtx('reply',m)}));
+ if(m.reactions?.length)d.append(el('div',{},m.reactions.map(r=>el('button',{className:'ghost',textContent:r.emoji+' '+r.n,style:(r.users||'').split(',').includes(String(me.id))?'font-weight:700':'',onclick:()=>sock.emit('message:react',{id:m.id,emoji:r.emoji})}))));
+ d.append(el('div',{className:'t',textContent:(m.pinned?'📌 ':'')+(m.edited?'изменено ':'')+hm(m.created_at)}));
+ if(!m.deleted){const a=el('div',{className:'act'},el('button',{textContent:'↩',onclick:()=>setCtx('reply',m)}),el('button',{textContent:'😊',onclick:()=>{const e=prompt('Реакция','👍');e&&sock.emit('message:react',{id:m.id,emoji:e})}}),el('button',{textContent:'↪',onclick:()=>fwd(m)}),el('button',{textContent:'📌',onclick:()=>sock.emit('message:pin',{id:m.id})}));
   if(mine)a.append(el('button',{textContent:'✎',onclick:()=>setCtx('edit',m)}));
   if(mine||['owner','admin'].includes(cur.role))a.append(el('button',{textContent:'🗑',onclick:()=>sock.emit('message:delete',{id:m.id})}));d.append(a)}
  return d}
@@ -115,6 +122,13 @@ function submit(){const t=$('#txt');const v=t.value.trim();if(!v)return;
  if(editing){sock.emit('message:edit',{id:editing.id,text:v});editing=null}else send(v);t.value='';reply=null;$('#ctx').style.display='none'}
 function send(text,fileUrl,fileName){sock.emit('message:send',{chatId:cur.id,text,fileUrl,fileName,replyTo:reply?.id},r=>r?.error&&alert(r.error))}
 function markRead(){const l=$('#msgs')?.lastElementChild;if(l&&cur)sock.emit('read',{chatId:cur.id,messageId:+l.id.slice(1)})}
+function fwd(m){const l=chats.map((c,i)=>(i+1)+'. '+c.title).join('\n');const c=chats[(+prompt('Переслать в чат №:\n'+l))-1];if(c)sock.emit('message:send',{chatId:c.id,text:m.text,fileUrl:m.file_url,fileName:m.file_name,fwdFrom:m.sender_name},r=>r?.error&&alert(r.error))}
+async function srch(){const q=prompt('Поиск в чате');if(!q)return;const r=await api('/chats/'+cur.id+'/search?q='+encodeURIComponent(q));$('#msgs').replaceChildren(el('button',{className:'ghost',textContent:'← назад к чату',onclick:()=>open(cur)}),...r.map(msgEl))}
+let mr;async function rec(e){const b=e.target;if(mr){mr.stop();return}try{const s=await navigator.mediaDevices.getUserMedia({audio:true});mr=new MediaRecorder(s);const ch=[];mr.ondataavailable=x=>ch.push(x.data);b.textContent='⏹';
+ mr.onstop=async()=>{s.getTracks().forEach(t=>t.stop());mr=null;b.textContent='🎤';const fd=new FormData();fd.append('file',new Blob(ch,{type:'audio/webm'}),'voice.webm');const r=await fetch('/api/upload',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});const j=await r.json();if(r.ok)send('',j.url,'voice.webm')};mr.start()}catch{alert('Нет доступа к микрофону')}}
+$('#prof').onclick=async()=>{const name=prompt('Имя',me.name);if(name===null)return;const bio=prompt('О себе',me.bio||'');if(bio===null)return;
+ const save=async av=>{me=await api('/profile','POST',{name,bio,avatar:av});alert('Сохранено')};
+ if(confirm('Загрузить новый аватар?')){const fi=el('input',{type:'file',accept:'image/*',onchange:async()=>{const fd=new FormData();fd.append('file',fi.files[0]);const r=await fetch('/api/upload',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});save((await r.json()).url)}});fi.click()}else save(me.avatar)};
 let st;$('#q').oninput=e=>{clearTimeout(st);const v=e.target.value.trim();if(v.length<2)return renderList();
  st=setTimeout(async()=>{const r=await api('/search?q='+encodeURIComponent(v));
   $('#list').replaceChildren(...r.users.map(u=>el('div',{className:'ci',onclick:async()=>{const c=await api('/chats','POST',{type:'private',userId:u.id});if(!chats.find(x=>x.id===c.id))chats.push(c);$('#q').value='';renderList();open(chats.find(x=>x.id===c.id))}},el('div',{},el('b',{textContent:u.name}),el('small',{textContent:'@'+u.username})))),

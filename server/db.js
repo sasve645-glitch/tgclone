@@ -22,4 +22,6 @@ CREATE TABLE IF NOT EXISTS messages(
 CREATE INDEX IF NOT EXISTS idx_msg_chat ON messages(chat_id,id);
 CREATE TABLE IF NOT EXISTS reads(chat_id INTEGER, user_id INTEGER, last_read INTEGER DEFAULT 0, PRIMARY KEY(chat_id,user_id));
 `);
+for (const q of ["ALTER TABLE users ADD COLUMN bio TEXT","ALTER TABLE users ADD COLUMN avatar TEXT","ALTER TABLE messages ADD COLUMN pinned INTEGER DEFAULT 0","ALTER TABLE messages ADD COLUMN fwd_from TEXT"]) { try { db.exec(q); } catch {} }
+db.exec('CREATE TABLE IF NOT EXISTS reactions(msg_id INTEGER, user_id INTEGER, emoji TEXT, PRIMARY KEY(msg_id,user_id))');
 module.exports = db;
